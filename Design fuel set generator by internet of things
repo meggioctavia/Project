@@ -1,0 +1,176 @@
+#include <FirebaseESP32.h>
+
+#include <Arduino.h>
+#define TRIGGER_PIN1 2
+#define ECHO_PIN1 4
+#define TRIGGER_PIN2 32
+#define ECHO_PIN2 33
+#define FLOW_METER_PIN 26
+const int relay = 27;
+bool pumpStatus = false;
+long duration1, duration2;
+int distance1, distance2, distance3, distance4;
+
+const float speedOfSound = 0.034;  // Kecepatan suara dalam cm/us
+const int pulseWidth = 10;  // Mikrodetik untuk pulsa pemicu
+
+// Variabel flow meter
+#define FlowMeterPulsePerSecondPerLiter 5.5
+float FlowCalculationDuration = 1000;
+volatile unsigned long FlowCalculationStartTime;
+volatile unsigned long PulseCount; // Pastikan PulseCount adalah volatile
+float flowRate = 0.0;
+float lajuAliran;
+double totalVolume = 1.9;
+
+void pulseCounter2() {
+  PulseCount++;
+}
+
+// Deklarasi Firebase
+FirebaseData firebaseData;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// Kredensial Firebase
+#define FIREBASE_HOST "https://tugas-akhir-meggi-octavia-default-rtdb.firebaseio.com/"
+#define FIREBASE_AUTH "KsScwJWfBiR1JuyKKEimqeaxsJIqkvQI9xkpeLxF"
+
+// Kredensial WiFi
+#define WIFI_SSID "robot"
+#define WIFI_PASSWORD "12345678"
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(relay, OUTPUT);
+  pinMode(TRIGGER_PIN1, OUTPUT);
+  pinMode(ECHO_PIN1, INPUT);
+  pinMode(TRIGGER_PIN2, OUTPUT);
+  pinMode(ECHO_PIN2, INPUT);
+  pinMode(FLOW_METER_PIN, INPUT_PULLUP);  // Pin digital 26 sebagai input dengan pull-up
+  attachInterrupt(digitalPinToInterrupt(FLOW_METER_PIN), pulseCounter2, RISING);  // Pasang interrupt ke pin 26
+  FlowCalculationStartTime = millis();
+
+  //Koneksi WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println();
+  Serial.print("Connected with IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  // Inisialisasi konfigurasi Firebase
+  config.api_key = "AIzaSyAmqh1lyPhKwPKqLbvJS5ov0wV1puDreTw";
+  config.host = FIREBASE_HOST;
+  config.signer.tokens.legacy_token = FIREBASE_AUTH;
+
+  // Mulai koneksi ke Firebase
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  if (Firebase.ready()) {
+    Serial.println("Terhubung ke Firebase");
+  } else {
+    Serial.println("Gagal terhubung ke Firebase");
+    Serial.println("Karena: " + firebaseData.errorReason());
+  }
+}
+
+void loop() {
+  // Sensor Ultrasonik 1
+  digitalWrite(TRIGGER_PIN1, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIGGER_PIN1, HIGH);
+  delayMicroseconds(pulseWidth);
+  digitalWrite(TRIGGER_PIN1, LOW);
+
+  duration1 = pulseIn(ECHO_PIN1, HIGH);
+  if (duration1 > 0) {
+    distance1 = duration1 * speedOfSound / 2;
+    distance2 = 28 - (0.18263 + 1.05127 * distance1); // Hitung jarak sebenarnya
+    Serial.print("Tinggi air 1: ");
+    Serial.print(distance2);
+    Serial.println(" cm");
+  } else {
+    Serial.println("Sensor 1: Pengukuran gagal");
+  }
+
+  delay(50);
+
+  // Sensor Ultrasonik 2
+  digitalWrite(TRIGGER_PIN2, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIGGER_PIN2, HIGH);
+  delayMicroseconds(pulseWidth);
+  digitalWrite(TRIGGER_PIN2, LOW);
+
+  duration2 = pulseIn(ECHO_PIN2, HIGH);
+  if (duration2 > 0) {
+    distance3 = duration2 * speedOfSound / 2;
+    distance4 = 29 - (-0.81697 + 1.11115 * distance3);  // Hitung jarak sebenarnya
+    Serial.print("Tinggi air 2: ");
+    Serial.print(distance4);
+    Serial.println(" cm");
+  } else {
+    Serial.println("Sensor 2: Pengukuran gagal");
+  }
+
+  // Tampilkan aliran air dari flow meter
+  if (millis() - FlowCalculationStartTime > FlowCalculationDuration) {
+    if (PulseCount == 0) {
+      flowRate = 0.0;  // Atur laju aliran ke nol jika tidak ada pulsa yang dihitung
+    } else {
+      flowRate = PulseCount / (2 * FlowMeterPulsePerSecondPerLiter * (FlowCalculationDuration / 1000.0));
+    }
+
+    // Terapkan kalibrasi: y = 1.5345x + 0.0486
+    lajuAliran = 0.0486 + 1.5345 * flowRate;
+
+    totalVolume += (lajuAliran / 60.0);  // Tambahkan jumlah air yang melewati detik ini ke volume total dalam liter
+
+    Serial.print("Laju aliran: ");
+    Serial.print(lajuAliran, 1);  // Cetak dengan 1 tempat desimal
+    Serial.println(" L/menit");
+
+    Serial.print("Volume Total: ");
+    Serial.print(totalVolume, 1);  // Cetak dengan 1 tempat desimal
+    Serial.println(" L");
+
+    FlowCalculationStartTime = millis();
+    PulseCount = 0;
+    delay(100);
+  }
+
+  // Kontrol relay
+  if (distance4 <= 6) { // Prioritaskan untuk mematikan pompa jika distance4 <= 6
+    digitalWrite(relay, HIGH);
+    Serial.println("Pompa mati karena tinggi air 2 mencapai 6 cm atau kurang");
+    pumpStatus = false;
+  } else if (distance2 >= 6 && distance2 <= 23) {
+    digitalWrite(relay, LOW);
+    Serial.println("Pompa menyala");
+    pumpStatus = true;
+  } else {
+    digitalWrite(relay, HIGH);
+    Serial.println("Pompa mati");
+    pumpStatus = false;
+  }
+
+  delay(1000); // Penundaan untuk pengukuran sensor
+
+  if (Firebase.setFloat(firebaseData, "/Hasil_Pembacaan/tinggi_air_1", distance2) &&
+      Firebase.setFloat(firebaseData, "/Hasil_Pembacaan/tinggi_air_2", distance4) &&
+      Firebase.setFloat(firebaseData, "//Hasil_Pembacaan/flow_rate", lajuAliran) &&
+      Firebase.setFloat(firebaseData, "/Hasil_Pembacaan/volume_total", totalVolume))
+  {
+    Serial.println("Data terkirim");
+    Serial.println();
+  } else {
+    Serial.println("Data tidak terkirim");
+    Serial.println("Karena: " + firebaseData.errorReason());
+  }
+}
